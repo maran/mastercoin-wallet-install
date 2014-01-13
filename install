@@ -1,0 +1,149 @@
+#!/bin/bash
+# @date:   2014-01-10
+# @author: Xendarboh Sensorii <xen@shastafareye.net>
+#
+# This script will:
+# 1) install system dependencies based on the Linux flavor (~Debian or Fedora)
+# 2) install a custom-compiled openssl into $MYUSR_PREFIX (see config below)
+# 3) install rvm and ruby
+# 4) install mastercoin-wallet
+#
+# :NOTE: Successive runs of the this script will upgrade and/or re-install the
+# packages it installs.  If this script fails at anytime (due to failed
+# dependencies, etc) it is OK to run the script again.
+
+
+########################################################################
+# CONFIGURATION
+########################################################################
+OPENSSL_GIT=https://github.com/openssl/openssl.git
+OPENSSL_BRANCH=OpenSSL_1_0_1-stable
+OPENSSL_TAG=OpenSSL_1_0_1f
+
+# which version of ruby to install with rvm
+RUBY=ruby-2.1.0
+
+# where our custom dependencies (like openssl) are compiled/installed
+MYUSR_PREFIX=~/.myusr
+
+# system dependencies
+DEBIAN_DEPS="git build-essential libqt4-gui libqt4-dev libssl-dev libgdbm-dev libncurses5-dev libreadline6-dev libyaml-dev libsqlite3-dev sqlite3 libgdbm-dev libffi-dev cmake automake libtool bison"
+FEDORA_DEPS="git gcc-c++ cmake patch readline-devel zlib-devel libyaml-devel libffi-devel autoconf automake libtool bison gdbm-devel qt-devel qtwebkit-devel"
+
+# :NOTE: make jobs > 1 can be problematic for some things
+#CPUS=$(cat /proc/cpuinfo | egrep "^processor" | nl | tail -n1 | cut -f 1)
+#JOBS="-j$CPUS"
+JOBS="-j1"
+
+die () { echo "ERROR: $1"; exit 1; }
+
+########################################################################
+# install system packages
+########################################################################
+if grep 'Ubuntu\|Debian' /etc/issue; then
+  echo "Debian based distro detected" 
+  sudo apt-get install -y $DEBIAN_DEPS
+elif grep 'Fedora' /etc/issue; then
+  echo "Fedora detected"
+  sudo yum install -y $FEDORA_DEPS
+fi
+
+########################################################################
+# build/install MYUSR directory
+########################################################################
+test -z "$MYUSR_PREFIX" && die "MYUSR_PREFIX is not set"
+test ! -d $MYUSR_PREFIX && mkdir $MYUSR_PREFIX
+test ! -d $MYUSR_PREFIX/src && mkdir $MYUSR_PREFIX/src
+test ! -d $MYUSR_PREFIX/bin && mkdir $MYUSR_PREFIX/bin
+E="$MYUSR_PREFIX/env"
+touch "$E" || die "failed to create MYUSR environment"
+echo "MYUSR_PREFIX=$MYUSR_PREFIX" > $E
+echo "export MYUSR_PREFIX=\$MYUSR_PREFIX" >> $E
+echo "export PKG_CONFIG_PATH=\$MYUSR_PREFIX/lib/pkgconfig" >> $E
+echo "export LD_LIBRARY_PATH=\$MYUSR_PREFIX/lib" >> $E
+echo "export PATH=\$MYUSR_PREFIX/bin:\$PATH" >> $E
+echo "export MANPATH=\$MYUSR_PREFIX/share/man:/usr/share/man" >> $E
+echo "export XDG_DATA_DIRS=\$MYUSR_PREFIX/share:\$XDG_DATA_DIRS" >> $E
+echo "export PYTHONPATH=\${PYTHONPATH}:\$MYUSR_PREFIX/lib/python2.7/site-packages" >> $E
+grep "$MYUSR_PREFIX/env" ~/.bashrc || echo "source $MYUSR_PREFIX/env" >> ~/.bashrc
+source $E
+
+########################################################################
+# install
+########################################################################
+install() {
+case $1 in
+  openssl)
+    if [ ! -d $MYUSR_PREFIX/src/$1 ]
+    then
+      git clone -b $OPENSSL_BRANCH --single-branch $OPENSSL_GIT $MYUSR_PREFIX/src/$1
+    else
+      cd $MYUSR_PREFIX/src/$1
+      git pull
+    fi
+
+    cd $MYUSR_PREFIX/src/$1 || exit 1
+    git checkout $OPENSSL_TAG || die "git checkout tag '$OPENSSL_TAG' failed"
+    ./config shared \
+      --prefix=$MYUSR_PREFIX \
+      --openssldir=$MYUSR_PREFIX/openssl \
+      -fPIC || exit 1
+
+    make clean
+    make $JOBS || die "openssl: make failed"
+    make test || die "openssl: make test failed" 
+    make install_sw || die "openssl: make install failed"
+    ;;
+
+  rvm)
+    # install or upgrade local rvm (@ ~/.rvm/)
+    if [ ! -d ~/.rvm/ ]
+    then
+      \curl -L https://get.rvm.io | bash -s stable --autolibs=enabled
+      echo "source ~/.rvm/scripts/rvm" >> ~/.bashrc
+      source ~/.rvm/scripts/rvm
+    else
+      # the first source is in case this script is run again after failing the first time
+      # (and thus .bashrc would not be sourced)
+      # the second source is if rvm upgraded its environment vars
+      source ~/.rvm/scripts/rvm
+      rvm get stable
+      source ~/.rvm/scripts/rvm
+    fi
+
+    # use --autolibs=2 to fail about which packages are required
+    # use --autolibs=1 to present required packages to install 
+    #export rvm_make_flags="$JOBS"
+    export rvm_configure_env=(CFLAGS="-O3 -fPIC")
+    rvm install $RUBY \
+      --enable-shared \
+      --with-openssl-dir=$MYUSR_PREFIX \
+      || die "rvm install $RUBY failed"
+    ;;
+
+  mastercoin-wallet)
+    echo "installing mastercoin-wallet and dependencies"
+    gem install mastercoin-wallet || die "gem install $1 failed"
+
+    # patch mastercoin-wallet to load openssl first because
+    # qtbindings incorrectly links with the system libcrypto while
+    # the openssl gem correctly links with our custom libcrypto
+    B=~/.rvm/gems/ruby-2.1.0/gems/mastercoin-wallet-*/bin/mastercoin-wallet
+    grep "require 'openssl'" $B || sed -i "s/require 'mastercoin-wallet'/require 'openssl'\n&/" $B
+
+    echo "#################################################################"
+    echo "Please open a new terminal (tab) and start the wallet by typing:"
+    echo "mastercoin-wallet"
+    echo "#################################################################"
+    ;;
+
+  *)
+    die "invalid install command: $1"
+    ;;
+esac
+}
+
+install openssl
+install rvm
+install mastercoin-wallet
+exit 0
